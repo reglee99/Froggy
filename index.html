@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Frog Screen</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; background: #1e3a4c;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  canvas { display: block; position: fixed; inset: 0; touch-action: none; }
+  body.nocursor, body.nocursor canvas { cursor: none !important; }
+
+  #ui {
+    position: fixed; top: 12px; left: 12px; z-index: 2;
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px; border-radius: 12px;
+    background: rgba(18, 18, 20, 0.55);
+    -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+    box-shadow: 0 4px 18px rgba(0,0,0,0.25);
+    color: #eee; font-size: 13px;
+    transition: opacity .4s ease;
+  }
+  #ui.hidden { opacity: 0; pointer-events: none; }
+
+  .swatch {
+    position: relative; width: 30px; height: 30px; border-radius: 8px;
+    overflow: hidden; border: 2px solid rgba(255,255,255,0.7); cursor: pointer; flex: none;
+  }
+  .swatch input {
+    position: absolute; inset: -8px; width: calc(100% + 16px); height: calc(100% + 16px);
+    border: 0; padding: 0; cursor: pointer; background: none;
+  }
+  #hex {
+    width: 6.2em; padding: 6px 8px; border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.25); background: rgba(0,0,0,0.35);
+    color: #fff; font: 14px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    outline: none;
+  }
+  #hex:focus { border-color: rgba(255,255,255,0.6); }
+  #hex.bad { border-color: #ff6b6b; color: #ffb3b3; }
+  #fs {
+    padding: 7px 12px; border-radius: 8px; border: 0; cursor: pointer;
+    background: rgba(255,255,255,0.9); color: #111; font-size: 13px; font-weight: 600;
+    white-space: nowrap;
+  }
+  #fs:hover { background: #fff; }
+
+  #hint {
+    position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+    padding: 6px 12px; border-radius: 999px; z-index: 2;
+    background: rgba(18,18,20,0.5); color: #eee; font-size: 13px;
+    pointer-events: none; transition: opacity 1s ease;
+  }
+  #hint.gone { opacity: 0; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="ui">
+  <label class="swatch" title="Pick a color"><input type="color" id="picker" value="#1e3a4c" aria-label="Background color picker"></label>
+  <input id="hex" type="text" value="#1e3a4c" maxlength="7" spellcheck="false" autocomplete="off" aria-label="Background hex color">
+  <button id="fs" type="button">Full screen</button>
+</div>
+<div id="hint">Tap the frog</div>
+
+<script>
+(() => {
+'use strict';
+
+/* ---------- helpers ---------- */
+const TAU = Math.PI * 2;
+const lerp = (a, b, t) => a + (b - a) * t;
+const lp = (a, b, t) => [lerp(a[0], b[0], t), lerp(a[1], b[1], t)];
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const rand = (a, b) => a + Math.random() * (b - a);
+const easeOut = t => 1 - (1 - t) * (1 - t);
+const easeInOut = t => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+function angDiff(a, b) { let d = (b - a) % TAU; if (d > Math.PI) d -= TAU; if (d < -Math.PI) d += TAU; return d; }
+
+/* ---------- canvas ---------- */
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W = 0, H = 0, S = 60, DPR = 1;
+let bg = '#1e3a4c';
+
+/* ---------- frog ---------- */
+const frog = {
+  x: 0, y: 0, angle: rand(0, TAU), state: 'idle', timer: rand(1.5, 3),
+  h: 0, e: 0, jump: null, turn: null, tongue: null,
+  blink: 0, blinkTimer: rand(2, 5), gulp: 0, breath: 0,
+  notice: 0, reaction: 1, huntHops: 0,
+  spots: [], bumps: [], flecks: []
+};
+// Unique skin pattern (unit coordinates, body length ~1.1)
+for (let i = 0; i < 12; i++) {
+  frog.spots.push({ x: rand(-0.26, 0.26), y: rand(-0.18, 0.44), r: rand(0.032, 0.07), ar: rand(0.6, 1.25), rot: rand(0, TAU) });
+}
+frog.spots.push({ x: rand(-0.04, 0.04), y: -0.43, r: 0.03, ar: 0.8, rot: 0 });
+for (let i = 0; i < 70; i++) {
+  frog.bumps.push({ x: rand(-0.3, 0.3), y: rand(-0.55, 0.48), r: rand(0.005, 0.012), light: Math.random() < 0.5 });
+}
+for (let i = 0; i < 6; i++) frog.flecks.push({ a: rand(0, TAU), d: rand(0.035, 0.07) });
+
+let fly = null;
+let flyTimer = rand(3, 6);
+
+function bounds() {
+  const m = S * 0.95;
+  let x0 = m, x1 = W - m, y0 = m, y1 = H - m;
+  if (x1 < x0) x0 = x1 = W / 2;
+  if (y1 < y0) y0 = y1 = H / 2;
+  return { x0, x1, y0, y1 };
+}
+function clampPt(x, y) { const b = bounds(); return [clamp(x, b.x0, b.x1), clamp(y, b.y0, b.y1)]; }
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  S = clamp(Math.min(W, H) * 0.03, 9, 29);
+  if (!frog.x && !frog.y) { frog.x = W / 2; frog.y = H / 2; }
+  [frog.x, frog.y] = clampPt(frog.x, frog.y);
+  if (frog.jump) {
+    [frog.jump.sx, frog.jump.sy] = clampPt(frog.jump.sx, frog.jump.sy);
+    [frog.jump.tx, frog.jump.ty] = clampPt(frog.jump.tx, frog.jump.ty);
+  }
+  if (fly && fly.state !== 'leaving') {
+    [fly.tx, fly.ty] = clampPt(fly.tx, fly.ty);
+    if (fly.state !== 'flying') { fly.x = fly.tx; fly.y = fly.ty; }
+  }
+  if (frog.tongue && fly) { frog.tongue.tx = fly.x; frog.tongue.ty = fly.y; }
+}
+
+/* ---------- frog actions ---------- */
+function startJump(tx, ty, a1, opts = {}) {
+  const dist = Math.hypot(tx - frog.x, ty - frog.y);
+  frog.jump = {
+    sx: frog.x, sy: frog.y, tx, ty, t: 0,
+    dur: 0.3 + 0.055 * dist / S,
+    hmax: clamp(0.22 + 0.11 * dist / S, 0.22, 0.85),
+    a0: frog.angle, a1, after: opts.after, startle: !!opts.startle
+  };
+  frog.turn = null;
+  frog.state = 'jump';
+}
+function startTurn(a1, after) {
+  const d = Math.abs(angDiff(frog.angle, a1));
+  frog.turn = { a0: frog.angle, a1, t: 0, dur: 0.12 + d * 0.13, after };
+  frog.state = 'turn';
+}
+function startTongue() {
+  fly.state = 'targeted';
+  frog.tongue = { t: 0, dur: 0.38, tx: fly.x, ty: fly.y, caught: false };
+  frog.state = 'tongue';
+}
+
+function randomAction() {
+  frog.timer = rand(2.5, 7);
+  if (Math.random() < 0.35) {
+    startTurn(frog.angle + (Math.random() < 0.5 ? -1 : 1) * rand(0.4, 1.3));
+    return;
+  }
+  let best = null, bestScore = -1;
+  for (let i = 0; i < 8; i++) {
+    const a = frog.angle + rand(-1.4, 1.4) + (i > 4 ? Math.PI : 0);
+    const d = rand(0.9, 2.4) * S;
+    const p = clampPt(frog.x + Math.cos(a) * d, frog.y + Math.sin(a) * d);
+    const tr = Math.hypot(p[0] - frog.x, p[1] - frog.y);
+    const score = Math.min(tr, d) * rand(0.85, 1.15) - (tr < d * 0.6 ? 999 : 0);
+    if (score > bestScore) { bestScore = score; best = p; }
+  }
+  const tr = Math.hypot(best[0] - frog.x, best[1] - frog.y);
+  if (tr < S * 0.4) { // cornered: hop toward the middle
+    const a = Math.atan2(H / 2 - frog.y, W / 2 - frog.x);
+    best = clampPt(frog.x + Math.cos(a) * S * 1.5, frog.y + Math.sin(a) * S * 1.5);
+  }
+  const a1 = Math.atan2(best[1] - frog.y, best[0] - frog.x) + rand(-0.3, 0.3);
+  startJump(best[0], best[1], a1, { startle: true });
+}
+
+function startleJump() {
+  let best = null, bestScore = -1;
+  for (let i = 0; i < 16; i++) {
+    const a = rand(0, TAU), d = rand(2.2, 3.8) * S;
+    const p = clampPt(frog.x + Math.cos(a) * d, frog.y + Math.sin(a) * d);
+    const score = Math.hypot(p[0] - frog.x, p[1] - frog.y) * rand(0.8, 1.2);
+    if (score > bestScore) { bestScore = score; best = p; }
+  }
+  const a1 = Math.atan2(best[1] - frog.y, best[0] - frog.x) + rand(-0.25, 0.25);
+  frog.huntHops = 0; frog.notice = 0; frog.reaction = rand(0.6, 1.5);
+  frog.timer = rand(2.5, 6);
+  startJump(best[0], best[1], a1, { startle: true });
+}
+
+function planHunt() {
+  const dx = fly.x - frog.x, dy = fly.y - frog.y, d = Math.hypot(dx, dy);
+  const a = Math.atan2(dy, dx);
+  if ((d > 1.9 * S || d < 0.75 * S) && frog.huntHops < 2) {
+    frog.huntHops++;
+    const p = clampPt(fly.x - Math.cos(a) * 1.15 * S, fly.y - Math.sin(a) * 1.15 * S);
+    startJump(p[0], p[1], Math.atan2(fly.y - p[1], fly.x - p[0]), {
+      after: () => { frog.notice = frog.reaction - 0.3; }
+    });
+  } else {
+    startTurn(a, () => {
+      if (fly && fly.state === 'landed') startTongue();
+    });
+  }
+}
+
+function mouthWorld() {
+  const sc = S * (1 + 0.3 * frog.h), r = frog.angle + Math.PI / 2;
+  const c = Math.cos(r), s = Math.sin(r), lx = 0, ly = -0.5;
+  return [frog.x + (lx * c - ly * s) * sc, frog.y + (lx * s + ly * c) * sc];
+}
+function tongueTip() {
+  const tg = frog.tongue, t = tg.t;
+  const out = t < 0.4 ? easeOut(t / 0.4) : t < 0.55 ? 1 : 1 - easeInOut((t - 0.55) / 0.45);
+  const m = mouthWorld();
+  return [lerp(m[0], tg.tx, out), lerp(m[1], tg.ty, out), m];
+}
+
+function updateFrog(dt) {
+  frog.breath += dt;
+  frog.blinkTimer -= dt;
+  if (frog.blinkTimer <= 0) { frog.blink = 0.2; frog.blinkTimer = rand(2.5, 8); }
+  if (frog.blink > 0) frog.blink -= dt;
+  if (frog.gulp > 0) frog.gulp -= dt;
+
+  switch (frog.state) {
+    case 'idle': {
+      frog.h = 0; frog.e = 0;
+      if (fly && fly.state === 'landed') {
+        frog.notice += dt;
+        if (frog.notice > frog.reaction) { planHunt(); return; }
+      } else frog.notice = Math.min(frog.notice, 0);
+      frog.timer -= dt;
+      if (frog.timer <= 0) randomAction();
+      break;
+    }
+    case 'jump': {
+      const j = frog.jump;
+      j.t += dt / j.dur;
+      const t = Math.min(1, j.t);
+      frog.x = lerp(j.sx, j.tx, t);
+      frog.y = lerp(j.sy, j.ty, t);
+      frog.h = Math.sin(Math.PI * t) * j.hmax;
+      frog.e = Math.pow(Math.sin(Math.PI * t), 0.55);
+      frog.angle = j.a0 + angDiff(j.a0, j.a1) * easeOut(Math.min(1, t / 0.4));
+      if (j.startle && fly && fly.state === 'landed' && Math.hypot(fly.x - frog.x, fly.y - frog.y) < S * 0.9) flyLeave();
+      if (t >= 1) {
+        frog.h = 0; frog.e = 0; frog.angle = j.a1;
+        frog.state = 'idle'; frog.jump = null;
+        if (j.after) j.after();
+      }
+      break;
+    }
+    case 'turn': {
+      const tr = frog.turn;
+      tr.t += dt / tr.dur;
+      const t = Math.min(1, tr.t);
+      frog.angle = tr.a0 + angDiff(tr.a0, tr.a1) * easeInOut(t);
+      frog.h = 0.03 * Math.sin(Math.PI * t);
+      frog.e = 0.12 * Math.sin(Math.PI * t);
+      if (t >= 1) {
+        frog.h = 0; frog.e = 0; frog.state = 'idle'; frog.turn = null;
+        if (tr.after) tr.after();
+      }
+      break;
+    }
+    case 'tongue': {
+      const tg = frog.tongue;
+      tg.t += dt / tg.dur;
+      if (!tg.caught && tg.t >= 0.4 && fly) { tg.caught = true; fly.state = 'caught'; }
+      if (tg.caught && fly) { const p = tongueTip(); fly.x = p[0]; fly.y = p[1]; }
+      if (tg.t >= 1) {
+        if (tg.caught) { fly = null; flyTimer = rand(7, 16); frog.gulp = 0.6; }
+        frog.tongue = null; frog.state = 'idle';
+        frog.timer = rand(2, 5); frog.huntHops = 0; frog.notice = 0;
+      }
+      break;
+    }
+  }
+}
+
+/* ---------- fly ---------- */
+function spawnFly() {
+  const b = bounds();
+  let tx = W / 2, ty = H / 2;
+  for (let i = 0; i < 30; i++) {
+    tx = rand(b.x0, b.x1); ty = rand(b.y0, b.y1);
+    const d = Math.hypot(tx - frog.x, ty - frog.y);
+    if (d > S * 1.4 && d < S * 4.5) break;
+  }
+  const o = S * 0.6, side = Math.floor(Math.random() * 4);
+  let x, y;
+  if (side === 0) { x = -o; y = rand(0, H); }
+  else if (side === 1) { x = W + o; y = rand(0, H); }
+  else if (side === 2) { x = rand(0, W); y = -o; }
+  else { x = rand(0, W); y = H + o; }
+  fly = { x, y, tx, ty, heading: Math.atan2(ty - y, tx - x), th: 0, state: 'flying',
+          alt: 1, t: 0, phase: rand(0, TAU), wait: rand(8, 15), hops: 0, ft: 0 };
+}
+function flyLeave() {
+  const a = rand(0, TAU), R = Math.max(W, H);
+  fly.tx = W / 2 + Math.cos(a) * R; fly.ty = H / 2 + Math.sin(a) * R;
+  fly.state = 'leaving';
+}
+function flyLand() {
+  fly.state = 'landed'; fly.alt = 0; fly.th = fly.heading + rand(-0.6, 0.6);
+  frog.notice = 0; frog.reaction = rand(0.5, 1.6); frog.huntHops = 0;
+}
+
+function updateFly(dt) {
+  if (!fly) { flyTimer -= dt; if (flyTimer <= 0) spawnFly(); return; }
+  fly.t += dt;
+  if (fly.state === 'flying' || fly.state === 'leaving') {
+    fly.ft += dt;
+    const dx = fly.tx - fly.x, dy = fly.ty - fly.y, d = Math.hypot(dx, dy);
+    const want = Math.atan2(dy, dx);
+    const near = fly.state === 'flying' && d < S * 1.2;
+    fly.heading += angDiff(fly.heading, want) * Math.min(1, dt * (near ? 12 : 3.2));
+    if (!near) fly.heading += (Math.sin(fly.t * 7.3 + fly.phase) * 3.5 + Math.sin(fly.t * 19.1) * 2) * dt;
+    const sp = Math.max(S, 40) * (fly.state === 'leaving' ? 3.4 : 2.5) * (near ? Math.max(0.2, d / (S * 1.2)) : 1);
+    const step = Math.min(sp * dt, near ? d : Infinity);
+    fly.x += Math.cos(fly.heading) * step; fly.y += Math.sin(fly.heading) * step;
+    if (fly.state === 'flying') {
+      fly.alt = Math.min(1, d / (S * 0.9));
+      if (d < Math.max(2, S * 0.04) || fly.ft > 14) { fly.x = fly.tx; fly.y = fly.ty; flyLand(); }
+    } else {
+      fly.alt = Math.min(1, fly.alt + dt * 3);
+      if (fly.x < -S * 1.5 || fly.x > W + S * 1.5 || fly.y < -S * 1.5 || fly.y > H + S * 1.5) {
+        fly = null; flyTimer = rand(6, 14);
+      }
+    }
+  } else if (fly.state === 'landed') {
+    fly.wait -= dt;
+    if (Math.random() < dt * 0.6) fly.th = fly.heading + rand(-1.2, 1.2);
+    fly.heading += angDiff(fly.heading, fly.th) * Math.min(1, dt * 6);
+    if (fly.wait <= 0) { flyLeave(); return; }
+    // occasionally the fly hops to a nearby spot
+    if (fly.hops < 2 && frog.state === 'idle' && frog.notice < frog.reaction * 0.5 && Math.random() < dt * 0.06) {
+      const a = rand(0, TAU), dd = rand(0.6, 1.6) * S;
+      [fly.tx, fly.ty] = clampPt(fly.x + Math.cos(a) * dd, fly.y + Math.sin(a) * dd);
+      fly.state = 'flying'; fly.ft = 0; fly.hops++;
+    }
+  }
+}
+
+/* ---------- drawing: frog ---------- */
+const COL = {
+  outline: '#22361a',
+  skin: '#5a8431',
+  skinLite: '#6f9944',
+  skinDark: '#3a5a1f',
+  toeTip: '#93ad66',
+  spot: 'rgba(38, 50, 20, 0.88)',
+  spotRim: 'rgba(214, 222, 160, 0.38)',
+  band: 'rgba(36, 48, 18, 0.72)',
+  ridge: 'rgba(226, 218, 150, 0.55)'
+};
+
+function seg(a, b, w, color) {
+  ctx.strokeStyle = color; ctx.lineWidth = w;
+  ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+}
+function dot(p, r, color) { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(p[0], p[1], r, 0, TAU); ctx.fill(); }
+function band(a, b, t, half, w) {
+  const px = lerp(a[0], b[0], t), py = lerp(a[1], b[1], t);
+  const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1;
+  const nx = -dy / L * half, ny = dx / L * half;
+  seg([px - nx, py - ny], [px + nx, py + ny], w, COL.band);
+}
+function highlight(a, b, w) {
+  seg([a[0] - 0.012, a[1] - 0.012], [b[0] - 0.012, b[1] - 0.012], w, 'rgba(235, 245, 190, 0.17)');
+}
+
+function drawBackLeg(side, e) {
+  ctx.save(); ctx.scale(side, 1);
+  const hip = [0.19, 0.30];
+  const knee = lp([0.47, 0.08], [0.24, 0.70], e);
+  const ankle = lp([0.31, 0.47], [0.22, 1.00], e);
+  const phi = lerp(0.95, 1.62, e);
+  const spread = lerp(1, 0.55, e);
+  const M = [ankle[0] + Math.cos(phi) * 0.15, ankle[1] + Math.sin(phi) * 0.15];
+  const offs = [-0.62, -0.31, 0, 0.27, 0.54], lens = [0.14, 0.2, 0.28, 0.23, 0.15];
+  const toes = offs.map((o, i) => [M[0] + Math.cos(phi + o * spread) * lens[i], M[1] + Math.sin(phi + o * spread) * lens[i]]);
+
+  // webbing
+  ctx.fillStyle = 'rgba(52, 80, 28, 0.55)';
+  ctx.beginPath(); ctx.moveTo(M[0], M[1]);
+  for (let i = 0; i < toes.length; i++) {
+    ctx.lineTo(toes[i][0], toes[i][1]);
+    if (i < toes.length - 1) {
+      const a = phi + (offs[i] + offs[i + 1]) / 2 * spread, l = Math.min(lens[i], lens[i + 1]) * 0.55;
+      ctx.lineTo(M[0] + Math.cos(a) * l, M[1] + Math.sin(a) * l);
+    }
+  }
+  ctx.closePath(); ctx.fill();
+
+  // outline pass
+  seg(hip, knee, 0.19, COL.outline); seg(knee, ankle, 0.13, COL.outline); seg(ankle, M, 0.085, COL.outline);
+  toes.forEach(t => { seg(M, t, 0.045, COL.outline); dot(t, 0.03, COL.outline); });
+  // fill pass
+  seg(hip, knee, 0.155, COL.skin); seg(knee, ankle, 0.1, COL.skin); seg(ankle, M, 0.058, COL.skinLite);
+  toes.forEach(t => { seg(M, t, 0.022, COL.skinLite); dot(t, 0.019, COL.toeTip); });
+  // leg bands
+  band(hip, knee, 0.33, 0.065, 0.045); band(hip, knee, 0.66, 0.06, 0.042);
+  band(knee, ankle, 0.3, 0.045, 0.036); band(knee, ankle, 0.68, 0.04, 0.034);
+  highlight(hip, knee, 0.045); highlight(knee, ankle, 0.03);
+  ctx.restore();
+}
+
+function drawFrontLeg(side, e) {
+  ctx.save(); ctx.scale(side, 1);
+  const sh = [0.2, -0.08];
+  const elbow = lp([0.40, 0.02], [0.30, 0.18], e);
+  const wrist = lp([0.38, -0.20], [0.27, 0.36], e);
+  const phi = lerp(-1.1, 1.5, e);
+  const spread = lerp(1, 0.5, e);
+  const offs = [-0.65, -0.22, 0.22, 0.6], lens = [0.08, 0.115, 0.12, 0.085];
+  const fingers = offs.map((o, i) => [wrist[0] + Math.cos(phi + o * spread) * lens[i], wrist[1] + Math.sin(phi + o * spread) * lens[i]]);
+
+  seg(sh, elbow, 0.105, COL.outline); seg(elbow, wrist, 0.088, COL.outline);
+  fingers.forEach(f => { seg(wrist, f, 0.038, COL.outline); dot(f, 0.024, COL.outline); });
+  seg(sh, elbow, 0.078, COL.skin); seg(elbow, wrist, 0.06, COL.skin);
+  dot(wrist, 0.032, COL.skinLite);
+  fingers.forEach(f => { seg(wrist, f, 0.02, COL.skinLite); dot(f, 0.016, COL.toeTip); });
+  band(elbow, wrist, 0.5, 0.035, 0.03);
+  highlight(sh, elbow, 0.025);
+  ctx.restore();
+}
+
+function bodyPath() {
+  ctx.beginPath();
+  ctx.moveTo(0, -0.62);
+  ctx.bezierCurveTo(0.14, -0.62, 0.29, -0.50, 0.29, -0.33);
+  ctx.bezierCurveTo(0.29, -0.20, 0.26, -0.14, 0.29, -0.02);
+  ctx.bezierCurveTo(0.35, 0.16, 0.34, 0.44, 0, 0.50);
+  ctx.bezierCurveTo(-0.34, 0.44, -0.35, 0.16, -0.29, -0.02);
+  ctx.bezierCurveTo(-0.26, -0.14, -0.29, -0.20, -0.29, -0.33);
+  ctx.bezierCurveTo(-0.29, -0.50, -0.14, -0.62, 0, -0.62);
+  ctx.closePath();
+}
+
+function drawBody(L) {
+  ctx.save();
+  const br = 1 + 0.014 * Math.sin(frog.breath * 2.7);
+  ctx.scale(br, 1);
+
+  bodyPath();
+  ctx.lineWidth = 0.035; ctx.strokeStyle = COL.outline; ctx.stroke();
+  const g = ctx.createRadialGradient(L[0] * 0.08, -0.05 + L[1] * 0.08, 0.02, 0, 0.02, 0.55);
+  g.addColorStop(0, '#86b04f'); g.addColorStop(0.5, '#5f8b34'); g.addColorStop(1, '#344f1c');
+  ctx.fillStyle = g; ctx.fill();
+
+  ctx.save();
+  bodyPath(); ctx.clip();
+
+  // eardrums
+  [-1, 1].forEach(s => {
+    ctx.fillStyle = 'rgba(96, 78, 42, 0.55)';
+    ctx.beginPath(); ctx.arc(s * 0.27, -0.235, 0.045, 0, TAU); ctx.fill();
+  });
+
+  // spots
+  frog.spots.forEach(sp => {
+    ctx.save(); ctx.translate(sp.x, sp.y); ctx.rotate(sp.rot); ctx.scale(1, sp.ar);
+    ctx.beginPath(); ctx.arc(0, 0, sp.r, 0, TAU);
+    ctx.fillStyle = COL.spot; ctx.fill();
+    ctx.lineWidth = 0.014; ctx.strokeStyle = COL.spotRim; ctx.stroke();
+    ctx.restore();
+  });
+
+  // dorsolateral ridges
+  [-1, 1].forEach(s => {
+    ctx.beginPath();
+    ctx.moveTo(s * 0.15, -0.29);
+    ctx.bezierCurveTo(s * 0.21, -0.06, s * 0.23, 0.2, s * 0.13, 0.43);
+    ctx.lineWidth = 0.034; ctx.strokeStyle = COL.ridge; ctx.stroke();
+    ctx.lineWidth = 0.01; ctx.strokeStyle = 'rgba(40, 55, 20, 0.5)';
+    ctx.save(); ctx.translate(s * 0.022, 0); ctx.stroke(); ctx.restore();
+  });
+
+  // skin bumps
+  frog.bumps.forEach(b => {
+    ctx.fillStyle = b.light ? 'rgba(220, 235, 170, 0.22)' : 'rgba(20, 35, 10, 0.25)';
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.fill();
+  });
+
+  // wet sheen (follows light)
+  const sx = L[0] * 0.07, sy = -0.05 + L[1] * 0.07;
+  const sg = ctx.createRadialGradient(sx, sy, 0, sx, sy, 0.3);
+  sg.addColorStop(0, 'rgba(255, 255, 235, 0.16)'); sg.addColorStop(1, 'rgba(255, 255, 235, 0)');
+  ctx.fillStyle = sg;
+  ctx.beginPath(); ctx.ellipse(sx, sy, 0.15, 0.32, 0, 0, TAU); ctx.fill();
+
+  // edge shading
+  bodyPath(); ctx.lineWidth = 0.09; ctx.strokeStyle = 'rgba(18, 32, 8, 0.35)'; ctx.stroke();
+  ctx.restore();
+
+  // nostrils
+  [-1, 1].forEach(s => {
+    ctx.fillStyle = 'rgba(15, 20, 8, 0.75)';
+    ctx.beginPath(); ctx.ellipse(s * 0.045, -0.555, 0.013, 0.009, s * 0.5, 0, TAU); ctx.fill();
+  });
+  ctx.restore();
+}
+
+function drawEyes(L) {
+  let g = 1;
+  if (frog.gulp > 0) g = 1 - 0.38 * Math.sin(Math.PI * (1 - frog.gulp / 0.6));
+  const blink = frog.blink > 0 ? Math.sin(Math.PI * (frog.blink / 0.2)) : 0;
+  [-1, 1].forEach(s => {
+    const cx = s * 0.2, cy = -0.36;
+    // socket bulge
+    const sg = ctx.createRadialGradient(cx, cy, 0.05, cx, cy, 0.11 * (0.6 + 0.4 * g));
+    sg.addColorStop(0, COL.skin); sg.addColorStop(1, COL.outline);
+    ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(cx, cy, 0.108 * (0.65 + 0.35 * g), 0, TAU); ctx.fill();
+
+    const r = 0.083 * g;
+    const ig = ctx.createRadialGradient(cx + L[0] * 0.02, cy + L[1] * 0.02, 0.005, cx, cy, r);
+    ig.addColorStop(0, '#f2dc85'); ig.addColorStop(0.55, '#c09634'); ig.addColorStop(1, '#4e3a10');
+    ctx.fillStyle = ig; ctx.beginPath(); ctx.arc(cx, cy, r, 0, TAU); ctx.fill();
+    // iris flecks
+    ctx.fillStyle = 'rgba(60, 40, 10, 0.55)';
+    frog.flecks.forEach(f => { ctx.beginPath(); ctx.arc(cx + Math.cos(f.a) * f.d * g, cy + Math.sin(f.a) * f.d * g, 0.007, 0, TAU); ctx.fill(); });
+    // horizontal pupil
+    ctx.fillStyle = '#080806';
+    ctx.beginPath(); ctx.ellipse(cx, cy, 0.047 * g, 0.026 * g, 0, 0, TAU); ctx.fill();
+    // specular
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.beginPath(); ctx.arc(cx + L[0] * 0.035 * g, cy + L[1] * 0.035 * g, 0.018 * g, 0, TAU); ctx.fill();
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
+    ctx.beginPath(); ctx.arc(cx - L[0] * 0.03 * g, cy - L[1] * 0.03 * g, 0.008 * g, 0, TAU); ctx.fill();
+    // eyelid
+    if (blink > 0.02) {
+      ctx.globalAlpha = blink;
+      ctx.fillStyle = COL.skinDark; ctx.beginPath(); ctx.arc(cx, cy, r + 0.004, 0, TAU); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    ctx.lineWidth = 0.012; ctx.strokeStyle = 'rgba(20, 30, 10, 0.7)';
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, TAU); ctx.stroke();
+  });
+}
+
+function drawFrogShadow() {
+  const f = frog, h = f.h;
+  ctx.save();
+  ctx.translate(f.x + S * (0.05 + h * 0.45), f.y + S * (0.08 + h * 0.6));
+  ctx.rotate(f.angle + Math.PI / 2);
+  ctx.translate(0, S * 0.2 * f.e);
+  ctx.scale(S * 0.5, S * (0.64 + 0.4 * f.e));
+  const a = 0.34 * (1 - 0.45 * h);
+  const g = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
+  g.addColorStop(0, `rgba(0,0,0,${a})`); g.addColorStop(0.55, `rgba(0,0,0,${a * 0.7})`); g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, 1, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+
+function drawFrog() {
+  const f = frog, sc = S * (1 + 0.3 * f.h), rot = f.angle + Math.PI / 2;
+  // world light from upper-left, expressed in the frog's local frame
+  const c = Math.cos(-rot), s = Math.sin(-rot);
+  const L = [(-0.707 * c + 0.707 * s), (-0.707 * s - 0.707 * c)];
+  ctx.save();
+  ctx.translate(f.x, f.y); ctx.rotate(rot); ctx.scale(sc, sc);
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  drawBackLeg(1, f.e); drawBackLeg(-1, f.e);
+  drawFrontLeg(1, f.e); drawFrontLeg(-1, f.e);
+  drawBody(L);
+  drawEyes(L);
+  ctx.restore();
+}
+
+function drawTongue() {
+  const [tx, ty, m] = tongueTip();
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#b84a60'; ctx.lineWidth = S * 0.06;
+  ctx.beginPath(); ctx.moveTo(m[0], m[1]); ctx.lineTo(tx, ty); ctx.stroke();
+  ctx.strokeStyle = 'rgba(240, 150, 165, 0.7)'; ctx.lineWidth = S * 0.02;
+  ctx.beginPath(); ctx.moveTo(m[0], m[1]); ctx.lineTo(tx, ty); ctx.stroke();
+  ctx.fillStyle = '#cf5a70'; ctx.beginPath(); ctx.arc(tx, ty, S * 0.05, 0, TAU); ctx.fill();
+  ctx.fillStyle = 'rgba(255, 210, 215, 0.6)'; ctx.beginPath(); ctx.arc(tx - S * 0.015, ty - S * 0.015, S * 0.015, 0, TAU); ctx.fill();
+  ctx.restore();
+  if (fly && fly.state === 'caught') drawFly();
+}
+
+/* ---------- drawing: fly ---------- */
+function drawFly() {
+  const f = fly, alt = f.alt, airborne = f.state === 'flying' || f.state === 'leaving';
+  const fs = Math.max(S * 0.21, 7) * (1 + 0.35 * alt);
+
+  // shadow
+  if (f.state !== 'caught') {
+    ctx.save();
+    ctx.translate(f.x + S * (0.02 + alt * 0.5), f.y + S * (0.03 + alt * 0.7));
+    ctx.rotate(f.heading);
+    ctx.fillStyle = `rgba(0,0,0,${0.32 - 0.17 * alt})`;
+    ctx.beginPath(); ctx.ellipse(0, 0, S * 0.08, S * 0.045 * (airborne ? 1.6 : 1), 0, 0, TAU); ctx.fill();
+    ctx.restore();
+  }
+
+  ctx.save();
+  ctx.translate(f.x, f.y); ctx.rotate(f.heading); ctx.scale(fs, fs);
+  ctx.lineCap = 'round';
+
+  if (!airborne) { // legs
+    ctx.strokeStyle = '#1b1b1d'; ctx.lineWidth = 0.025;
+    [[0.25, 0.28], [0.04, 0.32], [-0.18, 0.28]].forEach(([lx, ly]) => {
+      [-1, 1].forEach(s => {
+        ctx.beginPath(); ctx.moveTo(0.08, s * 0.04);
+        ctx.quadraticCurveTo((0.08 + lx) / 2, s * ly * 0.85, lx, s * ly); ctx.stroke();
+      });
+    });
+  }
+
+  // abdomen
+  ctx.fillStyle = '#3a3e43';
+  ctx.beginPath(); ctx.ellipse(-0.2, 0, 0.3, 0.19, 0, 0, TAU); ctx.fill();
+  ctx.strokeStyle = 'rgba(15,15,18,0.7)'; ctx.lineWidth = 0.03;
+  [-0.12, -0.26, -0.38].forEach(x => { ctx.beginPath(); ctx.ellipse(x, 0, 0.02, 0.17 * (1 - Math.abs(x + 0.2)), 0, -1.2, 1.2); ctx.stroke(); });
+  ctx.fillStyle = 'rgba(190, 200, 210, 0.18)';
+  ctx.beginPath(); ctx.ellipse(-0.2, -0.05, 0.2, 0.06, 0, 0, TAU); ctx.fill();
+  // thorax
+  ctx.fillStyle = '#2b2e32';
+  ctx.beginPath(); ctx.ellipse(0.08, 0, 0.16, 0.15, 0, 0, TAU); ctx.fill();
+  ctx.strokeStyle = 'rgba(150, 155, 160, 0.6)'; ctx.lineWidth = 0.022;
+  [-0.05, 0.05].forEach(y => { ctx.beginPath(); ctx.moveTo(-0.04, y); ctx.lineTo(0.18, y); ctx.stroke(); });
+  // head + eyes
+  ctx.fillStyle = '#222'; ctx.beginPath(); ctx.ellipse(0.27, 0, 0.08, 0.15, 0, 0, TAU); ctx.fill();
+  [-1, 1].forEach(s => {
+    ctx.fillStyle = '#8e2b1c'; ctx.beginPath(); ctx.ellipse(0.29, s * 0.09, 0.07, 0.075, 0, 0, TAU); ctx.fill();
+    ctx.fillStyle = 'rgba(255,190,170,0.5)'; ctx.beginPath(); ctx.arc(0.27, s * 0.09 - 0.025, 0.02, 0, TAU); ctx.fill();
+  });
+
+  // wings
+  const wing = (ang, alpha) => {
+    ctx.save(); ctx.rotate(ang);
+    ctx.fillStyle = `rgba(215, 228, 242, ${alpha})`;
+    ctx.strokeStyle = `rgba(40, 45, 55, ${alpha * 1.4})`; ctx.lineWidth = 0.015;
+    ctx.beginPath(); ctx.ellipse(0.32, 0, 0.33, 0.12, 0, 0, TAU); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0.02, 0); ctx.lineTo(0.6, -0.03); ctx.moveTo(0.05, 0.02); ctx.lineTo(0.5, 0.08); ctx.stroke();
+    ctx.restore();
+  };
+  [-1, 1].forEach(s => {
+    ctx.save(); ctx.translate(0.04, s * 0.05);
+    if (airborne) {
+      const flap = (Math.sin(f.t * 95 + (s > 0 ? 0 : 0.3)) + 1) / 2;
+      ctx.fillStyle = 'rgba(220, 230, 240, 0.16)';
+      ctx.beginPath(); ctx.moveTo(0, 0);
+      ctx.arc(0, 0, 0.62, Math.PI - s * 0.25, Math.PI - s * 1.45, s > 0); ctx.closePath(); ctx.fill();
+      wing(Math.PI - s * (0.25 + 1.2 * flap), 0.3);
+    } else {
+      wing(Math.PI - s * 0.28, 0.38);
+    }
+    ctx.restore();
+  });
+  ctx.restore();
+}
+
+/* ---------- loop ---------- */
+function draw() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  drawFrogShadow();
+  if (fly && (fly.state === 'landed' || fly.state === 'targeted')) drawFly();
+  if (frog.tongue) drawTongue();
+  drawFrog();
+  if (fly && (fly.state === 'flying' || fly.state === 'leaving')) drawFly();
+}
+
+let last = performance.now();
+function frame(now) {
+  let dt = (now - last) / 1000; last = now;
+  if (dt > 0.05) dt = 0.05;
+  if (dt > 0) { updateFly(dt); updateFrog(dt); }
+  draw();
+  requestAnimationFrame(frame);
+}
+
+/* ---------- input ---------- */
+function hitFrog(x, y, touch) {
+  const r = Math.max(S * (touch ? 0.85 : 0.65) * (1 + 0.3 * frog.h), touch ? 30 : 20);
+  return Math.hypot(x - frog.x, y - frog.y) < r;
+}
+const hint = document.getElementById('hint');
+setTimeout(() => hint.classList.add('gone'), 7000);
+
+canvas.addEventListener('pointerdown', e => {
+  if (hitFrog(e.clientX, e.clientY, e.pointerType === 'touch')) {
+    hint.classList.add('gone');
+    if (frog.state === 'idle' || frog.state === 'turn') startleJump();
+  }
+});
+canvas.addEventListener('pointermove', e => {
+  canvas.style.cursor = hitFrog(e.clientX, e.clientY, false) ? 'pointer' : 'default';
+});
+
+/* ---------- background color UI ---------- */
+const picker = document.getElementById('picker');
+const hexIn = document.getElementById('hex');
+function normHex(v) {
+  v = String(v || '').trim().replace(/^#/, '');
+  if (/^[0-9a-f]{3}$/i.test(v)) v = v.split('').map(c => c + c).join('');
+  return /^[0-9a-f]{6}$/i.test(v) ? '#' + v.toLowerCase() : null;
+}
+function setBg(c, from) {
+  bg = c;
+  document.documentElement.style.background = c;
+  document.body.style.background = c;
+  if (from !== 'picker') picker.value = c;
+  if (from !== 'hex') hexIn.value = c;
+  hexIn.classList.remove('bad');
+  try { localStorage.setItem('frogScreenBg', c); } catch (e) {}
+  try { history.replaceState(null, '', '#' + c.slice(1)); } catch (e) {}
+}
+hexIn.addEventListener('input', () => {
+  const c = normHex(hexIn.value);
+  if (c) setBg(c, 'hex'); else hexIn.classList.add('bad');
+});
+hexIn.addEventListener('blur', () => { hexIn.value = bg; hexIn.classList.remove('bad'); });
+hexIn.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === 'Escape') hexIn.blur(); e.stopPropagation(); });
+picker.addEventListener('input', () => setBg(picker.value, 'picker'));
+
+let initial = normHex(location.hash);
+if (!initial) { try { initial = normHex(localStorage.getItem('frogScreenBg')); } catch (e) {} }
+setBg(initial || '#1e3a4c');
+window.addEventListener('hashchange', () => { const c = normHex(location.hash); if (c && c !== bg) setBg(c); });
+
+/* ---------- fullscreen ---------- */
+const ui = document.getElementById('ui');
+const fsBtn = document.getElementById('fs');
+const root = document.documentElement;
+const canFS = !!(root.requestFullscreen || root.webkitRequestFullscreen);
+if (!canFS) fsBtn.style.display = 'none';
+const isFS = () => !!(document.fullscreenElement || document.webkitFullscreenElement);
+function toggleFS() {
+  try {
+    const p = isFS()
+      ? (document.exitFullscreen || document.webkitExitFullscreen).call(document)
+      : (root.requestFullscreen || root.webkitRequestFullscreen).call(root);
+    if (p && p.catch) p.catch(() => {});
+  } catch (e) {}
+}
+fsBtn.addEventListener('click', toggleFS);
+document.addEventListener('keydown', e => {
+  if (e.target === hexIn) return;
+  if (e.key === 'f' || e.key === 'F') toggleFS();
+});
+
+let idleT;
+function poke() {
+  ui.classList.remove('hidden');
+  document.body.classList.remove('nocursor');
+  clearTimeout(idleT);
+  if (isFS()) idleT = setTimeout(() => {
+    if (document.activeElement !== hexIn) { ui.classList.add('hidden'); document.body.classList.add('nocursor'); }
+  }, 2500);
+}
+['fullscreenchange', 'webkitfullscreenchange'].forEach(ev => document.addEventListener(ev, () => {
+  fsBtn.textContent = isFS() ? 'Exit full screen' : 'Full screen';
+  poke(); resize(); setTimeout(resize, 120);
+}));
+window.addEventListener('pointermove', poke);
+window.addEventListener('pointerdown', poke);
+window.addEventListener('resize', resize);
+
+resize();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
