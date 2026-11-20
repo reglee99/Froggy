@@ -42,11 +42,24 @@
   #hex:focus { border-color: rgba(255,255,255,0.6); }
   #hex.bad { border-color: #ff6b6b; color: #ffb3b3; }
   #fs {
-    padding: 7px 12px; border-radius: 8px; border: 0; cursor: pointer;
-    background: rgba(255,255,255,0.9); color: #111; font-size: 13px; font-weight: 600;
-    white-space: nowrap;
+    width: 32px; height: 30px; padding: 0; border-radius: 8px; border: 0; cursor: pointer; flex: none;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(255,255,255,0.9); color: #111;
   }
   #fs:hover { background: #fff; }
+  #hide {
+    width: 28px; height: 28px; border-radius: 8px; border: 0; cursor: pointer; flex: none;
+    background: rgba(255,255,255,0.12); color: #eee; font-size: 18px; line-height: 1;
+  }
+  #hide:hover { background: rgba(255,255,255,0.25); }
+  #show {
+    position: fixed; top: 12px; left: 12px; z-index: 2;
+    width: 34px; height: 34px; border-radius: 10px; border: 0; cursor: pointer;
+    background: rgba(18,18,20,0.45); color: #eee; font-size: 18px; line-height: 1;
+    -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+    opacity: 0; pointer-events: none; transition: opacity .4s ease;
+  }
+  #show.visible { opacity: 1; pointer-events: auto; }
 
   #hint {
     position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
@@ -63,8 +76,10 @@
 <div id="ui">
   <label class="swatch" title="Pick a color"><input type="color" id="picker" value="#1e3a4c" aria-label="Background color picker"></label>
   <input id="hex" type="text" value="#1e3a4c" maxlength="7" spellcheck="false" autocomplete="off" aria-label="Background hex color">
-  <button id="fs" type="button">Full screen</button>
+  <button id="fs" type="button" title="Full screen (F)" aria-label="Full screen"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+  <button id="hide" type="button" title="Hide controls (H)" aria-label="Hide controls">&times;</button>
 </div>
+<button id="show" type="button" title="Show controls (H)" aria-label="Show controls">&#9881;</button>
 <div id="hint">Tap the frog</div>
 
 <script>
@@ -122,7 +137,7 @@ function resize() {
   W = window.innerWidth; H = window.innerHeight;
   canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
   canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
-  S = clamp(Math.min(W, H) * 0.03, 9, 29);
+  S = clamp(Math.min(W, H) * 0.06, 18, 58);
   if (!frog.x && !frog.y) { frog.x = W / 2; frog.y = H / 2; }
   [frog.x, frog.y] = clampPt(frog.x, frog.y);
   if (frog.jump) {
@@ -200,16 +215,24 @@ function startleJump() {
 function planHunt() {
   const dx = fly.x - frog.x, dy = fly.y - frog.y, d = Math.hypot(dx, dy);
   const a = Math.atan2(dy, dx);
-  if ((d > 1.9 * S || d < 0.75 * S) && frog.huntHops < 2) {
+  const inReach = d >= 0.75 * S && d <= 1.9 * S;
+  if (!inReach && frog.huntHops < 12) {
     frog.huntHops++;
-    const p = clampPt(fly.x - Math.cos(a) * 1.15 * S, fly.y - Math.sin(a) * 1.15 * S);
+    // Hop toward the fly in normal-sized hops (same range as a click hop),
+    // ending about one body length short of it.
+    const want = d - 1.15 * S;               // negative = too close, back off
+    const step = rand(2.2, 3.4) * S;
+    const dist = Math.sign(want) * Math.min(Math.abs(want), step);
+    const p = clampPt(frog.x + Math.cos(a) * dist, frog.y + Math.sin(a) * dist);
     startJump(p[0], p[1], Math.atan2(fly.y - p[1], fly.x - p[0]), {
-      after: () => { frog.notice = frog.reaction - 0.3; }
+      after: () => { frog.notice = frog.reaction - rand(0.5, 1.3); } // short pause between hops
     });
-  } else {
+  } else if (inReach) {
     startTurn(a, () => {
       if (fly && fly.state === 'landed') startTongue();
     });
+  } else {
+    frog.notice = -999; frog.timer = rand(2, 4); // give up on this fly
   }
 }
 
@@ -238,6 +261,7 @@ function updateFrog(dt) {
       if (fly && fly.state === 'landed') {
         frog.notice += dt;
         if (frog.notice > frog.reaction) { planHunt(); return; }
+        if (frog.notice > -100) break; // stalking: no random wandering
       } else frog.notice = Math.min(frog.notice, 0);
       frog.timer -= dt;
       if (frog.timer <= 0) randomAction();
@@ -295,7 +319,7 @@ function spawnFly() {
   for (let i = 0; i < 30; i++) {
     tx = rand(b.x0, b.x1); ty = rand(b.y0, b.y1);
     const d = Math.hypot(tx - frog.x, ty - frog.y);
-    if (d > S * 1.4 && d < S * 4.5) break;
+    if (d > S * 2.5 && d < S * 10) break;
   }
   const o = S * 0.6, side = Math.floor(Math.random() * 4);
   let x, y;
@@ -304,7 +328,7 @@ function spawnFly() {
   else if (side === 2) { x = rand(0, W); y = -o; }
   else { x = rand(0, W); y = H + o; }
   fly = { x, y, tx, ty, heading: Math.atan2(ty - y, tx - x), th: 0, state: 'flying',
-          alt: 1, t: 0, phase: rand(0, TAU), wait: rand(8, 15), hops: 0, ft: 0 };
+          alt: 1, t: 0, phase: rand(0, TAU), wait: rand(4, 9), hops: 0, ft: 0 };
 }
 function flyLeave() {
   const a = rand(0, TAU), R = Math.max(W, H);
@@ -737,6 +761,8 @@ window.addEventListener('hashchange', () => { const c = normHex(location.hash); 
 /* ---------- fullscreen ---------- */
 const ui = document.getElementById('ui');
 const fsBtn = document.getElementById('fs');
+const FS_ENTER = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>';
+const FS_EXIT = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg>';
 const root = document.documentElement;
 const canFS = !!(root.requestFullscreen || root.webkitRequestFullscreen);
 if (!canFS) fsBtn.style.display = 'none';
@@ -753,19 +779,44 @@ fsBtn.addEventListener('click', toggleFS);
 document.addEventListener('keydown', e => {
   if (e.target === hexIn) return;
   if (e.key === 'f' || e.key === 'F') toggleFS();
+  if (e.key === 'h' || e.key === 'H') setControlsHidden(!controlsHidden);
 });
+
+const showBtn = document.getElementById('show');
+let controlsHidden = false;
+try { controlsHidden = localStorage.getItem('frogScreenHideUI') === '1'; } catch (e) {}
+function setControlsHidden(v) {
+  controlsHidden = v;
+  try { localStorage.setItem('frogScreenHideUI', v ? '1' : '0'); } catch (e) {}
+  if (v && document.activeElement === hexIn) hexIn.blur();
+  poke();
+}
+document.getElementById('hide').addEventListener('click', () => setControlsHidden(true));
+showBtn.addEventListener('click', () => setControlsHidden(false));
 
 let idleT;
 function poke() {
-  ui.classList.remove('hidden');
   document.body.classList.remove('nocursor');
   clearTimeout(idleT);
+  if (controlsHidden) {
+    ui.classList.add('hidden');
+    showBtn.classList.add('visible');
+    idleT = setTimeout(() => {
+      showBtn.classList.remove('visible');
+      if (isFS()) document.body.classList.add('nocursor');
+    }, 2500);
+    return;
+  }
+  showBtn.classList.remove('visible');
+  ui.classList.remove('hidden');
   if (isFS()) idleT = setTimeout(() => {
     if (document.activeElement !== hexIn) { ui.classList.add('hidden'); document.body.classList.add('nocursor'); }
   }, 2500);
 }
 ['fullscreenchange', 'webkitfullscreenchange'].forEach(ev => document.addEventListener(ev, () => {
-  fsBtn.textContent = isFS() ? 'Exit full screen' : 'Full screen';
+  fsBtn.innerHTML = isFS() ? FS_EXIT : FS_ENTER;
+  fsBtn.title = isFS() ? 'Exit full screen (F)' : 'Full screen (F)';
+  fsBtn.setAttribute('aria-label', isFS() ? 'Exit full screen' : 'Full screen');
   poke(); resize(); setTimeout(resize, 120);
 }));
 window.addEventListener('pointermove', poke);
@@ -773,6 +824,7 @@ window.addEventListener('pointerdown', poke);
 window.addEventListener('resize', resize);
 
 resize();
+poke();
 requestAnimationFrame(frame);
 })();
 </script>
